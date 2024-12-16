@@ -109,8 +109,8 @@ async function cli () {
     .addOption(new Option('-t, --theme [theme]', 'Theme of the chart').choices(['default', 'forest', 'dark', 'neutral']).default('default'))
     .addOption(new Option('-w, --width [width]', 'Width of the page').argParser(parseCommanderInt).default(800))
     .addOption(new Option('-H, --height [height]', 'Height of the page').argParser(parseCommanderInt).default(600))
-    .option('-i, --input <input>', 'Input mermaid file. Files ending in .md will be treated as Markdown and all charts (e.g. ```mermaid (...)``` or :::mermaid (...):::) will be extracted and generated. Use `-` to read from stdin.')
-    .option('-o, --output [output]', 'Output file. It should be either md, svg, png, pdf or use `-` to output to stdout. Optional. Default: input + ".svg"')
+    .option('-i, --input <input>', 'Input mermaid file. Files ending in .md or .adoc will be treated as Markdown/AsciiDoc and all charts will be extracted and generated. Use `-` to read from stdin.')
+    .option('-o, --output [output]', 'Output file. It should be either md/adoc, svg, png, pdf or use `-` to output to stdout. Optional. Default: input + ".svg"')
     .addOption(new Option('-e, --outputFormat [format]', 'Output format for the generated image.').choices(['svg', 'png', 'pdf']).default(null, 'Loaded from the output file extension'))
     .addOption(new Option('-b, --backgroundColor [backgroundColor]', 'Background color for pngs/svgs (not pdfs). Example: transparent, red, \'#F0F0F0\'.').default('white'))
     .option('-c, --configFile [configFile]', 'JSON configuration file for mermaid.')
@@ -161,8 +161,8 @@ async function cli () {
         'please use `-e <format>.` '
       )
     }
-  } else if (!/\.(?:svg|png|pdf|md|markdown)$/.test(output)) {
-    error('Output file must end with ".md"/".markdown", ".svg", ".png" or ".pdf"')
+  } else if (!/\.(?:svg|png|pdf|md|markdown|adoc|asciidoc)$/.test(output)) {
+    error('Output file must end with ".md"/".markdown", ".adoc"/".asciidoc", ".svg", ".png" or ".pdf"')
   }
 
   const outputDir = path.dirname(output)
@@ -384,11 +384,11 @@ function markdownImage ({ url, title, alt }) {
 /**
  * Renders a mermaid diagram or mermaid markdown file.
  *
- * @param {`${string}.${"md" | "markdown"}` | string | undefined} input - If this ends with `.md`/`.markdown`,
- * path to a markdown file containing mermaid.
+ * @param {`${string}.${"md" | "markdown" | "adoc" | "asciidoc"}` | string | undefined} input - If this ends with `.md`/`.markdown`/`.adoc`/`.asciidoc`,
+ * path to a markdown/asciidoc file containing mermaid.
  * If this is a string, loads the mermaid definition from the given file.
  * If this is `undefined`, loads the mermaid definition from stdin.
- * @param {`${string}.${"md" | "markdown" | "svg" | "png" | "pdf"}` | "/dev/stdout"} output - Path to the output file.
+ * @param {`${string}.${"md" | "markdown" | "adoc" | "asciidoc" | "svg" | "png" | "pdf"}` | "/dev/stdout"} output - Path to the output file.
  * @param {Object} [opts] - Options
  * @param {import("puppeteer").LaunchOptions} [opts.puppeteerConfig] - Puppeteer launch options.
  * @param {boolean} [opts.quiet] - If set, suppress log output.
@@ -410,20 +410,15 @@ async function run (input, output, { puppeteerConfig = {}, quiet = false, output
 
   // TODO: should we use a Markdown parser like remark instead of rolling our own parser?
   const mermaidChartsInMarkdown = /^[^\S\n]*[`:]{3}(?:mermaid)([^\S\n]*\r?\n([\s\S]*?))[`:]{3}[^\S\n]*$/
+  const mermaidChartsInAsciidoc = /\[(\.)?mermaid\]\n\.{4,}\n([\s\S]*?)\.{4,}/
   const mermaidChartsInMarkdownRegexGlobal = new RegExp(mermaidChartsInMarkdown, 'gm')
-  /**
-   * @type {puppeteer.Browser | undefined}
-   * Lazy-loaded browser instance, only created when needed.
-   */
+  const mermaidChartsInAsciidocRegexGlobal = new RegExp(mermaidChartsInAsciidoc, 'gm')
+
   let browser
   try {
     if (!outputFormat) {
-      const outputFormatFromFilename =
-        /**
-         * @type {"md" | "markdown" | "svg" | "png" | "pdf"}
-         */ (path.extname(output).replace('.', ''))
-      if (outputFormatFromFilename === 'md' || outputFormatFromFilename === 'markdown') {
-        // fallback to svg in case no outputFormat is given and output file is MD
+      const outputFormatFromFilename = path.extname(output).replace('.', '')
+      if (['md', 'markdown', 'adoc', 'asciidoc'].includes(outputFormatFromFilename)) {
         outputFormat = 'svg'
       } else {
         outputFormat = outputFormatFromFilename
@@ -482,15 +477,57 @@ async function run (input, output, { puppeteerConfig = {}, quiet = false, output
       const images = await Promise.all(imagePromises)
 
       if (/\.(md|markdown)$/.test(output)) {
-        const outDefinition = definition.replace(mermaidChartsInMarkdownRegexGlobal, (_mermaidMd) => {
-          // pop first image from front of array
-          const { url, title, alt } =
-            /**
-             * @type {MarkdownImageProps} We use the same regex,
-             * so we will never try to get too many objects from the array.
-             * (aka `images.shift()` will never return `undefined`)
-             */ (images.shift())
+        const outDefinition = definition.replace(mermaidChartsInMarkdownRegexGlobal, () => {
+          const { url, title, alt } = images.shift()
           return markdownImage({ url, title, alt: alt || 'diagram' })
+        })
+        await fs.promises.writeFile(output, outDefinition, 'utf-8')
+        info(` ✅ ${output}`)
+      }
+    } else if (input && /\.(adoc|asciidoc)$/.test(input)) {
+      if (output === '/dev/stdout') {
+        throw new Error('Cannot use `stdout` with asciidoc input')
+      }
+
+      const imagePromises = []
+      for (const mermaidCodeblockMatch of definition.matchAll(mermaidChartsInAsciidocRegexGlobal)) {
+        if (browser === undefined) {
+          browser = await puppeteer.launch(puppeteerConfig)
+        }
+        const mermaidDefinition = mermaidCodeblockMatch[2] || mermaidCodeblockMatch[3]
+
+        const outputFile = output.replace(
+          /(\.(adoc|asciidoc|png|svg|pdf))$/,
+          `-${imagePromises.length + 1}$1`
+        ).replace(/\.(adoc|asciidoc)$/, `.${outputFormat}`)
+        const outputFileRelative = `./${path.relative(path.dirname(path.resolve(output)), path.resolve(outputFile))}`
+
+        const imagePromise = (async () => {
+          const { title, desc, data } = await renderMermaid(browser, mermaidDefinition, outputFormat, parseMMDOptions)
+          await fs.promises.writeFile(outputFile, data)
+          info(` ✅ ${outputFileRelative}`)
+
+          return {
+            url: outputFileRelative,
+            title,
+            alt: desc
+          }
+        })()
+        imagePromises.push(imagePromise)
+      }
+
+      if (imagePromises.length) {
+        info(`Found ${imagePromises.length} mermaid charts in AsciiDoc input`)
+      } else {
+        info('No mermaid charts found in AsciiDoc input')
+      }
+
+      const images = await Promise.all(imagePromises)
+
+      if (/\.(adoc|asciidoc)$/.test(output)) {
+        const outDefinition = definition.replace(mermaidChartsInAsciidocRegexGlobal, () => {
+          const { url, title, alt } = images.shift()
+          return `image::${url}[${alt || 'diagram'}${title ? `,title="${title}"` : ''}]`
         })
         await fs.promises.writeFile(output, outDefinition, 'utf-8')
         info(` ✅ ${output}`)
