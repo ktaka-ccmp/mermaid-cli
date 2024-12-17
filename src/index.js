@@ -421,7 +421,7 @@ async function run (input, output, { puppeteerConfig = {}, quiet = false, output
   // TODO: should we use a Markdown parser like remark instead of rolling our own parser?
   // Regex for different document formats
   const mermaidChartsInMarkdown = /^[^\S\n]*[`:]{3}(?:mermaid)([^\S\n]*\r?\n([\s\S]*?))[`:]{3}[^\S\n]*$/gm
-  const mermaidChartsInAsciidoc = /(?:^\[\.?mermaid\]\n\.{4,}\n([\s\S]*?)\.{4,})|(?:^[^\S\n]*[`:]{3}(?:mermaid)([^\S\n]*\r?\n([\s\S]*?))[`:]{3}[^\S\n]*$)/gm
+  const mermaidChartsInAsciidoc = /(?:^\[\.?mermaid\]\n\.{4,}\n([\s\S]*?)\.{4,})|(?:^\[\.?mermaid\]\nifdef::env-github\[\[source,mermaid\]\]\n\.{4,}\n([\s\S]*?)\.{4,})|(?:^[^\S\n]*[`:]{3}(?:mermaid)([^\S\n]*\r?\n([\s\S]*?))[`:]{3}[^\S\n]*$)/gm
   /**
    * @type {puppeteer.Browser | undefined}
    * Lazy-loaded browser instance, only created when needed.
@@ -471,7 +471,7 @@ async function run (input, output, { puppeteerConfig = {}, quiet = false, output
 
         // For AsciiDoc, use first capture group if [.mermaid] syntax, third capture group if ```mermaid syntax
         const mermaidDefinition = isAsciidoc
-          ? (match[1] || match[3])
+          ? (match[1] || match[2] || match[4])
           : match[2]
 
         const outputFile = output.replace(
